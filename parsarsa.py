@@ -13,16 +13,12 @@ class StateActionValues(UserDict):
     problem (interior of the set) we can use the normal dict api, otherwise, the get and set
     methods are the one that checks for blocks.
     """
+
     def __getitem__(self, key):
         if key not in self.data:
             self.data[key] = numpy.random.random()
         return self.data[key]
         
-
-def _sarsaiterate(sarsa, state, action):
-    " Iterate on sarsa with some intial state and action."
-    return sarsa._iterate(state, action)
-
 
 class SarsaAgent(Process):
     """
@@ -30,7 +26,7 @@ class SarsaAgent(Process):
     
     """
 
-    def __init__(self, part, inbox, outbox, max_iter=10, Epsilon=0.1, Alpha=0.1, Gamma=0.8):
+    def __init__(self, part, inbox, outbox, Q, max_iter=10, Epsilon=0.1, Alpha=0.1, Gamma=0.8):
         Process.__init__(self)
 
         # Save the parameters.
@@ -40,7 +36,7 @@ class SarsaAgent(Process):
 
         # State-Action Q estimates, we keep a copy for each part.
         # This include the estimates on the fringe estates
-        self.Q = StateActionValues()
+        self.Q = Q
 
         # Keep track of all the parts.
         self.part = part
@@ -75,6 +71,14 @@ class SarsaAgent(Process):
             for it in range(self.max_iter):                
                 res.append(self.iterate(state, action))
 
+                states = {}
+                for s, a in self.Q.keys():
+                    if s not in states:
+                        states[s] = {}
+                    states[s][a] = self.Q[(s, a)]
+                
+                #print states
+
             # Send a message with the fridges states needed, and with the results.
             fridges = [sa for sa in self.Q.keys() if sa[0].part() != self.part]
 
@@ -107,7 +111,10 @@ class SarsaAgent(Process):
         s *= (len(actions) - 1) / Epsilon
         return actions_value[1 + int(s)][0]
 
-    def iterate(self, state, action):
+    def iterate(self, initial_state, initial_action):
+
+        state = initial_state
+        action = initial_action
 
         while (not state.is_terminal()) and (state.part() == self.part):
             
@@ -134,6 +141,7 @@ class SarsaAgent(Process):
             state = next_state
             action = next_action
 
+        
         return state, action
 
                 
@@ -163,7 +171,7 @@ class Sarsa(object):
 
     """
 
-    def __init__(self, manager, parts, initial_state, Epsilon=0.1, Alpha=0.1, Gamma=0.8):
+    def __init__(self, manager, initial_state, Epsilon=0.1, Alpha=0.1, Gamma=0.8):
 
         # Save the parameters.
         self.Epsilon = Epsilon
@@ -171,17 +179,20 @@ class Sarsa(object):
         self.Gamma = Gamma
 
         # Keep track of all the parts.
-        self.parts = parts
+        self.parts = initial_state.parts()
 
         # Create the queues for the passing jobs.
-        self.outbox = dict((p, manager.Queue()) for p in parts)
+        self.outbox = dict((p, manager.Queue()) for p in self.parts)
         self.inbox = manager.Queue()
 
+        # Keep ourself the state-action values.
+        self.Q = dict((p, StateActionValues()) for p in self.parts)
+
         # Create the processes for each part.
-        self.agents = dict((p, SarsaAgent(p, self.outbox[p], self.inbox)) for p in self.parts)
+        self.agents = dict((p, SarsaAgent(p, self.outbox[p], self.inbox, self.Q[p])) for p in self.parts)
 
         # Each part has an unknown set of states in other parts.
-        self.needed_Q = dict((p, set([])) for p in parts)
+        self.needed_Q = dict((p, set([])) for p in self.parts)
 
         # Initial states.
         self.initial_states = []
@@ -215,7 +226,7 @@ class Sarsa(object):
             if len(self.initial_states) > 0:
 
                 # Get the jobs to send
-                jobs = set([choice(self.initial_states) for i in range(4 - running)])
+                jobs = set([choice(self.initial_states) for i in range(10 - running)])
                 
                 for job in jobs:
                     state, action = job
@@ -230,31 +241,29 @@ class Sarsa(object):
             
             # Read a message.
             msg = self.inbox.get()
+
+            # One less is running.
+            running -= 1
             
             # Get part.
             part = msg['part']
+            print part, running
 
             # A message bring results and needed fridges.
             self.needed_Q[part] = self.needed_Q[part].union(msg['fridges'])
 
             # And we add possible jobs for the future.
             for result in msg['results']:
-                
-                self.initial_states.append(result)
-
-                # Check if final state.
                 state, action = result
-                if state.is_terminal():
+
+                # If final state count iteration, if not save intermidiate job.
+                if not state.is_terminal():
+                    self.initial_states.append(result)
+                else:
                     self.outbox[self.initial_state.part()].put((self.initial_state, None))
                     running += 1
                     it += 1
-                    print "Iteration: ", it
-                
-            # One less is running.
-            running -= 1
-
-            print self.needed_Q
-
+                    print "Iteration: ", it                
                                                        
         # for p in self.parts:
         #     self.outbox[p].put(None)
@@ -275,6 +284,8 @@ class Sarsa(object):
 
             # Complete greedy action, no exploration!.
             action = self.agents[part].greedy_action(state=state, Epsilon=0)
+            print self.agents[part].Q
+            print state.position, action
 
             # Take the greedy action.
             state, r = state.next_state(action)
@@ -301,10 +312,11 @@ class BarnState(object):
 
     """
 
-    def __init__(self, position, food, size):
+    def __init__(self, position, food, size, amount_food):
         self.position = position
         self.food = food
         self.size = size
+        self.amount_food = amount_food
 
     def __hash__(self):
         h = "%d:" % self.size
@@ -329,16 +341,22 @@ class BarnState(object):
         elif action == 'down':
             next_position = (self.position[0], (self.position[1] - 1) % self.size)
 
+        elif action == 'stay':
+            next_position = (self.position[0], self.position[1])
+
         next_food = [f for f in self.food if f != next_position]
         reward = -1 if (len(next_food) == len(self.food)) else 1
 
-        return BarnState(next_position,  next_food, self.size), reward
+        if (next_food == []) and (next_position == (self.size-1, self.size-1)):
+            reward = 10
+
+        return BarnState(next_position,  next_food, self.size, self.amount_food), reward
             
     def is_terminal(self):
         return (self.food == []) and (self.position == (self.size-1, self.size-1))
 
     def actions(self):
-        actions = ["up", "down", "left", "right"]
+        actions = ["up", "down", "left", "right", "stay"]
 
         if self.position[0] == 0:
             actions.pop(actions.index("left"))
@@ -356,9 +374,10 @@ class BarnState(object):
 
         # Randomly locate the food on the ba<rn.
         amount_food = randint(size / 2, 2 * size)
+        amount_food = 0
         food = []
 
-        while len(food) < 0:
+        while len(food) < amount_food:
 
             # Add a new piece of food.
             food.append((randint(0, size-1), randint(0, size-1)))
@@ -366,11 +385,13 @@ class BarnState(object):
             # Ensure uniqueness.
             food = list(set(food) - set([(0, 0)]))
 
-        return cls((0 ,0), food, size)
+        return cls((0 ,0), food, size, amount_food)
         
     def part(self):
         return len(self.food)
 
+    def parts(self):
+        return range(self.amount_food + 1)
 
 def plot_evaluation(history, title, max_size, food, filename):
     " Plot an evaluation. "
@@ -410,13 +431,14 @@ if __name__ == '__main__':
     initial_state = BarnState.initial_state(size)
 
     # Create a single sarsa.
-    sarsa = Sarsa(manager, range(size + 1), initial_state)
+    sarsa = Sarsa(manager, initial_state)
 
     # Iterate 1000 times using the pool.
     it = 0
+    per_it = 200
     for i in range(100):
-        sarsa.iterate(20)
-        it += 20
-        history, reward = sarsa.eval()
+        sarsa.iterate(per_it)
+        it += per_it
+        history, reward = sarsa.eval()        
         plot_evaluation(history, "Parallel: iteration %d with reward %d" % (it, reward), size, initial_state.food, "parallel-iteration-%d.png" % (it, ))
 
