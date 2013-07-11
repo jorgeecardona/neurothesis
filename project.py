@@ -1,7 +1,12 @@
 import time
 from sarsa import State, Sarsa
 from itertools import izip_longest
+from random import randint
+from math import log10
 import pylab
+import sys
+import numpy
+
 
 class BarnState(State):
     """
@@ -66,7 +71,11 @@ class BarnState(State):
 
         return actions
 
-def plot_path(path):
+    
+
+
+def plot_evaluation(history, title, max_size, food, filename):
+    " Plot an evaluation. "
 
     pylab.clf()
     pylab.xlim(-2, max_size + 1)
@@ -74,36 +83,79 @@ def plot_path(path):
     pylab.axis('off')
 
     # Start.
+    pylab.title(title)
     pylab.annotate('start', xy=(0, 0), xytext=(-1, -1), size=10, bbox=dict(boxstyle="round4,pad=.5", fc="0.8"), arrowprops=dict(arrowstyle="->"))
     pylab.annotate('stop', xy=(max_size-1, max_size-1), xytext=(max_size, max_size), size=10, bbox=dict(boxstyle="round4,pad=.5", fc="0.8"), arrowprops=dict(arrowstyle="->"))
 
     # Show the food.
     for f in food:
         pylab.annotate('food', xy=f, size=5, bbox=dict(boxstyle="round4,pad=.5", fc="0.8"), ha='center')
-    
-    
-    for i in range(len(path) - 1):
-        pylab.arrow(path[i][0], path[i][1], path[i+1][0] - path[i][0], path[i+1][1] - path[i][1])
+
+    # Create the x and y locations.
+    x = [s.position[0] for s in history]
+    y = [s.position[1] for s in history]    
+    pylab.plot(x, y)
+
+    # Save the figure
+    pylab.savefig(filename)
 
 
-# Parameters.
-max_size = 20
-food = [(0,8), (4,4), (1,1), (8,8), (6,2), (12, 15), (17,2), (4, 12), (17, 17), (12, 1)]
+if __name__ == "__main__":
 
-# Start the algorithm.
-sarsa = Sarsa(BarnState((0,0), food, max_size), epsilon=0.1, alpha=0.1, gamma=0.2)
-sarsa.seed(int(100* time.time()))
+    # We want 5 scenarios.
+    number_of_scenarios = 5
 
-plot_in = [10, 100, 200, 400, 600, 1000, 1500, 2000, 4000, 5000, 6000, 8000, 10000, 12000, 15000, 20000] 
-for i in range(max(plot_in) + 1):
-    sarsa.iterate()
+    # Fixed size.
+    max_size = 10
 
-    if i % 10 == 0:
-        print i
-    
-    if i in plot_in:
-        plot_path([s.position for s in sarsa.history])
-        pylab.savefig('/tmp/simple-path-4-%d.png' % i)
-        print i
+    # Global parameters.
+    epsilon = 0.1
+    alpha = 0.1
+    gamma = 0.2
 
+    # Number of iterations.
+    max_iters = 20000
 
+    for n in range(1, number_of_scenarios + 1):
+
+        # Randomly locate the food on the barn.
+        amount_food = randint(max_size / 2, 2 * max_size)
+        food = []
+
+        while len(food) < amount_food:
+
+            # Add a new piece of food.
+            food.append((randint(0, max_size-1), randint(0, max_size-1)))
+
+            # Ensure uniqueness.
+            food = list(set(food))
+
+        # Start the algorithm.
+        sarsa = Sarsa(BarnState((0,0), food, max_size), epsilon=epsilon, alpha=alpha, gamma=gamma)
+        sarsa.seed(int(100 * time.time()))
+
+        # keep track of how much do we move the q.
+        track = []
+
+        for it in range(1, max_iters + 1):
+
+            if it % 10 == 0:
+                print "Scenario %d: %d/%d\r" % (n, it, max_iters) ,
+                sys.stdout.flush()
+
+            history, corrections = sarsa.iterate()
+            track.append(numpy.sqrt(sum(map(lambda x: x*x, corrections))))
+            
+            # We're just selecting nice places to evaluate the current policy and create a picture.
+            if (it % 10 ** int(log10(it)) == 0) and (it / 10 ** int(log10(it)) in [1, 2, 4, 8]):
+                print " evaluationg current policy at %d ..." % it                    
+                history, reward = sarsa.eval(max_size ** 2)
+            
+                # Plot this.
+                plot_evaluation(history, "Scenario %d at iteration %d with reward %d" % (n, it, reward), max_size, food, "scenario-%d-iteration-%d.png" % (n, it))
+
+        pylab.clf()
+        pylab.plot(track)
+        pylab.savefig("scenario-%d-learning.png" % (n, ))
+                
+            
