@@ -16,9 +16,10 @@ class StateActionValues(UserDict):
 
     def __getitem__(self, key):
         if key not in self.data:
-            self.data[key] = numpy.random.random()
-        return self.data[key]
-        
+            #self.data[key] = numpy.random.random()
+            self.data[key] = 0
+        return self.data[key]    
+
 
 class SarsaAgent(Process):
     """
@@ -26,17 +27,13 @@ class SarsaAgent(Process):
     
     """
 
-    def __init__(self, part, inbox, outbox, Q, max_iter=10, Epsilon=0.1, Alpha=0.1, Gamma=0.8):
+    def __init__(self, part, inbox, outbox, max_iter=20, Epsilon=0.8, Alpha=0.1, Gamma=0.8):
         Process.__init__(self)
 
         # Save the parameters.
         self.Epsilon = Epsilon
         self.Alpha = Alpha
         self.Gamma = Gamma
-
-        # State-Action Q estimates, we keep a copy for each part.
-        # This include the estimates on the fringe estates
-        self.Q = Q
 
         # Keep track of all the parts.
         self.part = part
@@ -62,7 +59,13 @@ class SarsaAgent(Process):
                 break
 
             # Job is just a pair state-action to start.
-            state, action = job
+            state, action, own_Q, extra_Q = job
+
+            # Recover the Q values.
+            self.own_Q = StateActionValues(own_Q)
+            self.extra_Q = StateActionValues(extra_Q)
+
+            # Compute greedy action
             if action is None:
                 action = self.greedy_action(state)
 
@@ -70,20 +73,9 @@ class SarsaAgent(Process):
             res = []
             for it in range(self.max_iter):                
                 res.append(self.iterate(state, action))
-
-                states = {}
-                for s, a in self.Q.keys():
-                    if s not in states:
-                        states[s] = {}
-                    states[s][a] = self.Q[(s, a)]
                 
-                #print states
-
-            # Send a message with the fridges states needed, and with the results.
-            fridges = [sa for sa in self.Q.keys() if sa[0].part() != self.part]
-
             # A message from the agent to the scheduler.
-            self.outbox.put({'part': self.part, 'fridges': set(fridges), 'results': res})
+            self.outbox.put({'part': self.part, 'extra_Q': self.extra_Q.data, 'own_Q': self.own_Q.data, 'results': res})
 
     def greedy_action(self, state, Epsilon=None):
         " Compute the E-greedy action. "
@@ -95,7 +87,11 @@ class SarsaAgent(Process):
         actions = state.actions()
 
         # List of tuples (action, value)
-        actions_value = [(a, self.Q[(state, a)]) for a in actions]
+        if state.part == self.part:
+            actions_value = [(a, self.own_Q[(state, a)]) for a in actions]
+        else:
+            actions_value = [(a, self.extra_Q[(state, a)]) for a in actions]
+            
         actions_value.sort(key=lambda x: -x[1])
 
         # We now have the state-actions values in order, add the probability.
@@ -116,8 +112,8 @@ class SarsaAgent(Process):
         state = initial_state
         action = initial_action
 
-        while (not state.is_terminal()) and (state.part() == self.part):
-            
+        while (not state.is_terminal()) and (state.part == self.part):
+
             # Take the greedy action.
             next_state, reward = state.next_state(action)
             
@@ -127,15 +123,15 @@ class SarsaAgent(Process):
             # If next state is in different part the reward is the estimated value.
             # We still use the value in this part, since is job of the scheduler to
             # update the value with the possible result in the other part.
-            if next_state.part() != self.part:
-                reward = self.Q[(next_state, next_action)]
-
-            # Next q.
-            next_q = self.Q[(next_state, next_action)]
+            if next_state.part != self.part:
+                reward = self.extra_Q[(next_state, next_action)]
+                next_q = reward
+            else:
+                next_q = self.own_Q[(next_state, next_action)]
             
             # Update Q(first_state, first_action)
-            correction = reward + self.Gamma * next_q - self.Q[(state, action)]
-            self.Q[(state, action)] += self.Alpha * correction
+            correction = reward + self.Gamma * next_q - self.own_Q[(state, action)]
+            self.own_Q[(state, action)] += self.Alpha * correction
             
             # Update state.
             state = next_state
@@ -171,7 +167,7 @@ class Sarsa(object):
 
     """
 
-    def __init__(self, manager, initial_state, Epsilon=0.1, Alpha=0.1, Gamma=0.8):
+    def __init__(self, manager, initial_state, Epsilon=0.8, Alpha=0.1, Gamma=0.8):
 
         # Save the parameters.
         self.Epsilon = Epsilon
@@ -179,17 +175,17 @@ class Sarsa(object):
         self.Gamma = Gamma
 
         # Keep track of all the parts.
-        self.parts = initial_state.parts()
+        self.parts = initial_state.parts
 
         # Create the queues for the passing jobs.
         self.outbox = dict((p, manager.Queue()) for p in self.parts)
         self.inbox = manager.Queue()
 
-        # Keep ourself the state-action values.
+        # Keep the global state-action values in here.
         self.Q = dict((p, StateActionValues()) for p in self.parts)
-
+        
         # Create the processes for each part.
-        self.agents = dict((p, SarsaAgent(p, self.outbox[p], self.inbox, self.Q[p])) for p in self.parts)
+        self.agents = dict((p, SarsaAgent(p, self.outbox[p], self.inbox, Epsilon=Epsilon, Gamma=Gamma, Alpha=Alpha)) for p in self.parts)
 
         # Each part has an unknown set of states in other parts.
         self.needed_Q = dict((p, set([])) for p in self.parts)
@@ -208,6 +204,12 @@ class Sarsa(object):
         numpy.random.seed(seed)
 
 
+    def select_jobs(self, n):
+        " Select n jobs to be scheduled."
+        return set([choice(self.initial_states) for i in range(n)])
+
+        return sorted(self.initial_states, key=lambda x: x[0].part)[:n]
+
     def iterate(self, max_iter=100):
         " Execute a single episode. "
 
@@ -215,8 +217,8 @@ class Sarsa(object):
         # a global stopping state.
         it = 0
 
-        # Start by sending an initial state.
-        self.outbox[self.initial_state.part()].put((self.initial_state, None))
+        # Start by sending an initial state.        
+        self.outbox[self.initial_state.part].put((self.initial_state, None, {}, {}))
 
         # Running now
         running = 1
@@ -226,17 +228,22 @@ class Sarsa(object):
             if len(self.initial_states) > 0:
 
                 # Get the jobs to send
-                jobs = set([choice(self.initial_states) for i in range(10 - running)])
+                # jobs = set([choice(self.initial_states) for i in range(10 - running)])
+                jobs = self.select_jobs(max(4 - running, 0))
                 
                 for job in jobs:
-                    state, action = job
-                    part = state.part()
-
-                    # Update the fridges state first.
-                    for sa in self.needed_Q[part]:
-                        self.agents[part].Q[sa] = self.agents[sa[0].part()].Q[sa]
                     
-                    self.outbox[part].put(job)
+                    state, action = job
+                    part = state.part
+
+                    # Get own and extra Q values.
+                    own_Q = self.Q[part].data
+                    extra_Q = dict((k, self.Q[k[0].part][k]) for k in self.needed_Q[part])
+
+                    # Submit job with Q values.
+                    self.outbox[part].put((state, action, own_Q, extra_Q))
+
+                    # One more is running.
                     running += 1
             
             # Read a message.
@@ -250,24 +257,57 @@ class Sarsa(object):
             print part, running
 
             # A message bring results and needed fridges.
-            self.needed_Q[part] = self.needed_Q[part].union(msg['fridges'])
+            self.needed_Q[part] = self.needed_Q[part].union(set(msg['extra_Q'].keys()))
+
+            # Update the Q values.
+            self.Q[part].data.update(msg['own_Q'])
 
             # And we add possible jobs for the future.
             for result in msg['results']:
-                state, action = result
+                state, action= result
 
                 # If final state count iteration, if not save intermidiate job.
                 if not state.is_terminal():
                     self.initial_states.append(result)
                 else:
-                    self.outbox[self.initial_state.part()].put((self.initial_state, None))
+
+                    # Get the Q values from the initial state.
+                    own_Q = self.Q[self.initial_state.part].data
+                    extra_Q = dict((k, self.Q[k[0].part][k]) for k in self.needed_Q[self.initial_state.part])
+
+                    # Send the job.
+                    self.outbox[self.initial_state.part].put((self.initial_state, None, own_Q, extra_Q))
+                    
                     running += 1
                     it += 1
                     print "Iteration: ", it                
                                                        
-        # for p in self.parts:
-        #     self.outbox[p].put(None)
-        #     self.agents[p].join()
+
+    def greedy_action(self, state, Epsilon=None):
+        " Compute the E-greedy action. "
+
+        # Get the current epsilon or the stored one (to control the ??greedyness??)
+        Epsilon = Epsilon or self.Epsilon 
+
+        # List of actions.
+        actions = state.actions()
+
+        # List of tuples (action, value)
+        actions_value = [(a, self.Q[state.part][(state, a)]) for a in actions]            
+        actions_value.sort(key=lambda x: -x[1])
+
+        # We now have the state-actions values in order, add the probability.
+        actions_p = [1 - Epsilon + Epsilon / len(actions)] + [Epsilon / len(actions)]
+
+        # Check if we're greed in this case.
+        s = numpy.random.random()
+        if s < 1 - Epsilon:
+            return actions_value[0][0]
+
+        # Choose one between the rest.
+        s -= 1 - Epsilon
+        s *= (len(actions) - 1) / Epsilon
+        return actions_value[1 + int(s)][0]
 
             
     def eval(self, max_iter=100):
@@ -280,12 +320,10 @@ class Sarsa(object):
 
         for it in range(max_iter):
 
-            part = state.part()
+            part = state.part
 
             # Complete greedy action, no exploration!.
-            action = self.agents[part].greedy_action(state=state, Epsilon=0)
-            print self.agents[part].Q
-            print state.position, action
+            action = self.greedy_action(state=state, Epsilon=0)
 
             # Take the greedy action.
             state, r = state.next_state(action)
@@ -317,6 +355,9 @@ class BarnState(object):
         self.food = food
         self.size = size
         self.amount_food = amount_food
+        
+        self.part = len(food)
+        self.parts = range(self.amount_food + 1)
 
     def __hash__(self):
         h = "%d:" % self.size
@@ -374,7 +415,6 @@ class BarnState(object):
 
         # Randomly locate the food on the ba<rn.
         amount_food = randint(size / 2, 2 * size)
-        amount_food = 0
         food = []
 
         while len(food) < amount_food:
@@ -387,11 +427,6 @@ class BarnState(object):
 
         return cls((0 ,0), food, size, amount_food)
         
-    def part(self):
-        return len(self.food)
-
-    def parts(self):
-        return range(self.amount_food + 1)
 
 def plot_evaluation(history, title, max_size, food, filename):
     " Plot an evaluation. "
@@ -431,11 +466,11 @@ if __name__ == '__main__':
     initial_state = BarnState.initial_state(size)
 
     # Create a single sarsa.
-    sarsa = Sarsa(manager, initial_state)
+    sarsa = Sarsa(manager, initial_state, Epsilon=0.8)
 
     # Iterate 1000 times using the pool.
     it = 0
-    per_it = 200
+    per_it = 10
     for i in range(100):
         sarsa.iterate(per_it)
         it += per_it
