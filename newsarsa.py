@@ -47,7 +47,7 @@ class SarsaBase(object):
 class SarsaAgent(Process, SarsaBase):
     " All the sarsa agents are processes."
 
-    def __init__(self, part, inbox, outbox, max_it=10000, Epsilon=0.8, Alpha=0.1, Gamma=0.8):
+    def __init__(self, part, inbox, outbox, max_it=500, Epsilon=0.8, Alpha=0.1, Gamma=0.8):
         Process.__init__(self)
 
         # Save the parameters.
@@ -102,14 +102,8 @@ class SarsaAgent(Process, SarsaBase):
         if control == 'stop':
             self.keep_running = False
 
-        if control == 'Q':
-            self.send_Q()
-
         if 'seed' in control:
             numpy.random.seed(control['seed'])
-
-        if 'time' in control:
-            print "Time %d: " % self.part, self.running_time
             
     def handle_problem(self, problem):
         " Handle the problem. "
@@ -119,41 +113,40 @@ class SarsaAgent(Process, SarsaBase):
         # Get the fringe data.
         self.Q.update(problem['Q'])
 
-        # Get the state-action.
-        state = problem['state']
-        action = problem['action']
-
         it = 0
 
         start = time.clock()
 
-        while state.part == self.part and not state.is_terminal:
+        jobs = []
 
-            # Iterate
-            state, action = self.iterate(state, action)
+        while it < self.max_it:
 
-            it += 1
+            # Get the state-action.
+            state = problem['state']
+            action = problem['action']
+            
+            while state.part == self.part and not state.is_terminal:
 
-            if it >= self.max_it:
-                break
+                # Iterate
+                state, action = self.iterate(state, action)
 
-        if not state.is_terminal:
-            # Send a new job.
-            self.send_job(state.part, state, action)            
-        else:            
-            # Send a done message.
-            self.outbox.put({'done': state})
+                it += 1
+
+            if not state.is_terminal:
+                # Send a new job.
+                jobs.append((state.part, state, action))
+            else:            
+                # Send a done message.
+                self.outbox.put({'done': state})
+
+        # Send the jobs.        
+        self.send_jobs(jobs)
 
         # Save the running time.
         self.running_time += time.clock() - start
 
-    def send_Q(self):
-        own_Q = dict(((s, a), self.Q[(s, a)]) for s, a in self.Q.data if s.part == self.part)
-        msg = {'Q': own_Q, 'part': self.part}
-        self.outbox.put(msg)
-
-    def send_job(self, part, state, action):
-
+    def send_jobs(self, jobs):
+     
         fringe = {}
 
         for s, a in self.Q.data:
@@ -167,16 +160,19 @@ class SarsaAgent(Process, SarsaBase):
                         fringe[sn.part] = {}
                     fringe[sn.part][(s, a)] = self.Q[(s, a)]
 
+        # Own Q.
+        own_Q = dict(((s, a), self.Q[(s, a)]) for s, a in self.Q.data if s.part == self.part)
+
         msg = {
             'problem': {
-                'part': state.part,
-                'state': state,
-                'action': action,
-                'fringe': fringe
+                'jobs': jobs,
+                'fringe': fringe,
+                'Q': own_Q
                 }
             }
 
         # Send a new job.
+        print "Running Time %d: %f" % (self.part, self.running_time)
         self.outbox.put(msg)
             
     def run(self):
@@ -250,18 +246,21 @@ class Sarsa(SarsaBase):
 
     def handle_problem(self, problem):
 
-        part = problem['part']
-
-        # # Save the fringe data.
+        # Save the fringe data.
         for p in problem['fringe']:
             self.fringe_Q[p].update(problem['fringe'][p])
 
-        # Save a job.
-        self.jobs[part].append({'state': problem['state'], 'action': problem['action']})
+        # Update the local copy of Q.
+        self.Q.update(problem['Q'])
 
-        # In case there is someone waiting for this job send it immediately.
-        if part in self.requests:
-            self.send_job(part)
+        # Save jobs.
+        for job in problem['jobs']:
+            part, state, action = job
+            self.jobs[part].append({'state': state, 'action': action})
+
+            # In case there is someone waiting for this job send it immediately.
+            if part in self.requests:
+                self.send_job(part)
                         
     def send_job(self, part):
 
@@ -318,32 +317,14 @@ class Sarsa(SarsaBase):
                 self.handle_problem(msg['problem'])
 
             if 'done' in msg:
+                
                 done_counter += 1
+
                 self.add_initial_job()
-                
-                # print("Done: %d" % done_counter)                
 
-                if done_counter % 100 == 0:
-                    print("Start to update the Q for a future evaluation.")
-                    print "Total time: ", time.clock() - start
-                    self.update_Q()
-
-            if 'Q' in msg:
-                
-                if msg['part'] in self.Q_requested:
-                    self.Q_requested.pop(self.Q_requested.index(msg['part']))
-                    
-                self.Q.update(msg['Q'])
-
-                if len(self.Q_requested) == 0:
+                print done_counter
+                if done_counter % 10 == 0:
                     self.eval(done_counter)
-
-    def update_Q(self):
-        self.Q_requested = []
-        for p in self.parts:
-            self.outboxes[p].put({'control': 'Q'})
-            self.outboxes[p].put({'control': 'time'})
-            self.Q_requested.append(p)
 
     def greedy_action(self, state):
         " Compute the E-greedy action. "
@@ -372,7 +353,7 @@ class Sarsa(SarsaBase):
             history.append(state)
             it += 1
 
-        print reward_total
+        print reward_total, [s.position for s in history]
             
         pylab.clf()
         pylab.xlim(-2, self.initial_state.size + 1)
@@ -395,8 +376,7 @@ class Sarsa(SarsaBase):
 
         # Save the figure        
         pylab.savefig("%s-%d.png" % (self.prefix, counter))
-        
-
+    
         
 
 if __name__ == '__main__':
