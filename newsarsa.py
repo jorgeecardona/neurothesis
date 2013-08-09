@@ -7,6 +7,8 @@ from multiprocessing import Process
 from multiprocessing import Manager
 import time
 from state import BarnState
+import matplotlib
+matplotlib.use('Agg')
 import pylab
 
 
@@ -89,7 +91,7 @@ class SarsaAgent(Process, SarsaBase):
 
         # If the next state is in another part we use an estimate for the reward.
         if next_state.part != self.part:
-            reward = next_q
+            reward += next_q
 
         # Update Q(first_state, first_action)
         correction = reward + self.Gamma * next_q - self.Q[(state, action)]
@@ -242,7 +244,7 @@ class Sarsa(SarsaBase):
 
     def seed_all(self):
         for outbox in self.outboxes.values():
-            outbox.put({'control': {'seed': int(time.time() * 1000000)}})
+            outbox.put({'control': {'seed': int(time.time())}})
 
     def handle_problem(self, problem):
 
@@ -389,7 +391,7 @@ if __name__ == '__main__':
     initial_state = BarnState.initial_state(size)
 
     # Create a single sarsa.
-    sarsa = Sarsa(initial_state, Epsilon=0.6, Alpha=0.2, Gamma=0.8, prefix=prefix)
+    sarsa = Sarsa(initial_state, Epsilon=0.6, Alpha=0.1, Gamma=0.8, prefix=prefix)
 
     # Seed all the agents.
     sarsa.seed_all()

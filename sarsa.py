@@ -231,21 +231,35 @@ class SarsaPartition(Sarsa):
     I will try to implement a patitioned sarsa based on ideas of the paper:
     http://www.ejournal.org.cn/Jweb_cje/EN/article/downloadArticleFile.do?attachType=PDF&id=7638
     The basic idea is that we can define a partition in the space state with some nice properties that I will try to express nicely if this works.
+
+    I will try to implement a way to split the big problem in little problems adding a method
+    *part* in the state class which says to which part the state belongs, if we hit a
+    `next_state` in a different class we are going to need to add a problem starting on
+    that state to the scheduler, and mark it to update, then any other subproblem that hit
+    this one will wait for the update mark it again and add a new subproblem starting in the
+    same point.
+
+    We need to add a mark to the Q values, this mark will control that a value of Q in
+    the boundary of a partition will be used just once by a subsolver.
+
     
     """
 
     def __init__(self, *args, **kwargs):
         super(SarsaPartition, self).__init__(*args, **kwargs)
-        
+
+        # We're going to store the states in this queues.
         self.queues = {}
 
         # We need to add the queues of the parts.
         for p in kwargs['parts']:
             self.queues[p] = Queue()
 
-
-    def iterate(self):
+    def iterate(self, part):
         " Execute a single episode. "
+
+        # Fetch a problem from part 
+        history, corrections, state = self.queue[part].get()
 
         self.reset()
         
